@@ -1,0 +1,128 @@
+version: "3.8"
+
+services:
+  # ---------- Llama.cpp Inference API ----------------------------------------
+  llama_cpp:
+    image: ghcr.io/ggml-org/llama.cpp:${LLAMA_CPP_TAG:-server-b5410}  # CPU build; use *:server-cuda for GPU
+    container_name: llama_cpp
+    profiles: ["llm"] # will not start unless you specify this profile
+    environment:
+      - LLAMA_MODEL=${LLAMA_MODEL}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+    command: >
+      -m /models/${LLAMA_MODEL}
+      --host 0.0.0.0
+      --port 8000
+      --ctx-size 4096
+      --api-key ${OPENAI_API_KEY}
+      --jinja
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./models:/models
+    deploy:
+      resources:
+        limits:
+          cpus: "6"
+          memory: 16g
+
+  # ---------- Object Storage -------------------------------------------------
+  minio:
+    image: minio/minio:${MINIO_IMAGE_TAG:-RELEASE.2025-04-22T22-12-26Z}
+    container_name: minio
+    environment:
+      - MINIO_ROOT_USER=${MINIO_ROOT_USER}
+      - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD}
+    command: server /data --console-address ':9001' --address ':9000'
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio_data:/data
+
+  create_buckets:
+    image: minio/mc:${MINIO_MC_TAG:-RELEASE.2025-04-16T18-13-26Z}
+    container_name: create_buckets
+    environment:
+      - MINIO_ROOT_USER=${MINIO_ROOT_USER}
+      - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD}
+      - MLFLOW_S3_ENDPOINT_URL=${MLFLOW_S3_ENDPOINT_URL}
+    depends_on:
+      - minio
+    entrypoint: >
+      /bin/sh -c "
+      set -e;
+      echo 'Waiting for MinIO to be available...';
+      until mc alias set myminio ${MLFLOW_S3_ENDPOINT_URL} ${MINIO_ROOT_USER} ${MINIO_ROOT_PASSWORD}; do sleep 0.5; done;
+      sleep 2;
+      mc mb -p myminio/artifacts || echo 'Bucket already exists.';
+      mc anonymous set download myminio/artifacts || echo 'Policy may already be set.';
+      echo 'Bucket created and configured.';
+      "
+
+  # ---------- Database -------------------------------------------------------
+  postgres:
+    image: postgres:${POSTGRES_TAG:-15}
+    container_name: postgres
+    restart: always
+    environment:
+      - POSTGRES_DB=${POSTGRES_DB}
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+    ports:
+      - "5432:5432"
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+
+  # ---------- MLflow Tracking Server ----------------------------------------
+  mlflow:
+    build:
+      context: .
+      dockerfile: ./docker/Dockerfile.mlflow
+    image: custom-mlflow:latest
+    container_name: mlflow
+    environment:
+      - MLFLOW_S3_ENDPOINT_URL=${MLFLOW_S3_ENDPOINT_URL}
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+    depends_on:
+      - postgres
+      - minio
+    command: >
+      mlflow server
+      --backend-store-uri postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      --default-artifact-root s3://artifacts
+      --host 0.0.0.0
+    ports:
+      - "8080:5000"
+    volumes:
+      - mlflow_data:/mlflow
+
+  # ---------- Jupyter Notebook Environment ----------------------------------
+  jupyter:
+    build:
+      context: .
+      dockerfile: ./docker/Dockerfile.jupyter
+    image: custom-jupyter:latest
+    container_name: jupyter
+    environment:
+      - JUPYTER_ENABLE_LAB=${JUPYTER_ENABLE_LAB}
+      - JUPYTER_TOKEN=${JUPYTER_TOKEN}
+      - JUPYTER_PASSWORD=${JUPYTER_PASSWORD}
+      - MLFLOW_TRACKING_URI=${MLFLOW_TRACKING_URI}
+      - MLFLOW_S3_ENDPOINT_URL=${MLFLOW_S3_ENDPOINT_URL}
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+      - OPENAI_API_BASE=${OPENAI_API_BASE}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+    depends_on:
+      - mlflow
+    ports:
+      - "8888:8888"
+    volumes:
+      - ./notebooks:/home/jovyan/work
+
+volumes:
+  pg_data:
+  minio_data:
+  mlflow_data:

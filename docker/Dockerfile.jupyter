@@ -1,0 +1,21 @@
+FROM quay.io/jupyter/pytorch-notebook:cuda12-python-3.11.8
+
+RUN pip install --no-cache-dir \
+        mlflow[extras]==2.11.1 \
+        boto3==1.34.* \
+    && fix-permissions $CONDA_DIR $HOME
+
+RUN pip install --no-cache-dir \
+    langchain==0.2.* \
+    langchain-openai==0.1.* \
+    langchain-community==0.2.* \
+    pydantic_ai==0.2.*
+
+# --- Set JupyterLab Dark theme as default ---
+RUN mkdir -p $HOME/.jupyter/lab/user-settings/@jupyterlab/apputils-extension/ && \
+    echo '{ "theme": "JupyterLab Dark" }' > \
+    $HOME/.jupyter/lab/user-settings/@jupyterlab/apputils-extension/themes.jupyterlab-settings && \
+    fix-permissions $HOME/.jupyter
+
+# Optional: Prebuild lab to apply theme faster on startup
+RUN jupyter lab build
